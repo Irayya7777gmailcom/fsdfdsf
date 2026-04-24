@@ -1,5 +1,5 @@
-# Fixes the security group egress rule validation error by configuring exactly one destination attribute (cidr_ipv4) for the VPC endpoint security group egress rule.
-# Generated Terraform code for AWS in us-east-1
+# Creates a production-oriented AWS VPC (10.0.0.0/16) with 1 public subnet, 1 private subnet, an Internet Gateway, a NAT Gateway, public/private route tables, and a single interface VPC endpoint named 'dsa', with DNS support/hostnames enabled and tags including 'ssds'.
+# Generated Terraform code for AWS in eastus
 
 terraform {
   required_version = ">= 1.14.0"
@@ -15,36 +15,81 @@ terraform {
 variable "availability_zones" {
   description = "Availability zones to use for subnets."
   type        = list(string)
-  default     = ["us-east-1a"]
+  default     = ["eastus"]
 
   validation {
-    condition     = length(var.availability_zones) >= 1
-    error_message = "At least one availability zone must be provided."
+    condition     = length(var.availability_zones) > 0
+    error_message = "availability_zones must contain at least one value."
   }
 }
 
-variable "private_subnet_cidr" {
-  description = "CIDR block for the private subnet."
+variable "environment" {
+  description = "Environment name used for tagging and naming."
   type        = string
-  default     = "10.0.2.0/24"
+  default     = "prod"
+
+  validation {
+    condition     = length(var.environment) > 0
+    error_message = "environment must not be empty."
+  }
 }
 
-variable "project_tag" {
-  description = "Value for the Project tag."
+variable "nat_gateway_private_ip" {
+  description = "Requested private IPv4 address for the NAT Gateway (must be within the public subnet CIDR)."
   type        = string
-  default     = "pra"
+  default     = "10.90.155.24"
 }
 
-variable "public_subnet_cidr" {
-  description = "CIDR block for the public subnet."
+variable "private_subnet_count" {
+  description = "Number of private subnets to create (one per AZ in order)."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.private_subnet_count >= 1
+    error_message = "private_subnet_count must be >= 1."
+  }
+}
+
+variable "project" {
+  description = "Project name used for tagging and naming."
   type        = string
-  default     = "10.0.1.0/24"
+  default     = "ssds"
+
+  validation {
+    condition     = length(var.project) > 0
+    error_message = "project must not be empty."
+  }
+}
+
+variable "public_subnet_count" {
+  description = "Number of public subnets to create (one per AZ in order)."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.public_subnet_count >= 1
+    error_message = "public_subnet_count must be >= 1."
+  }
 }
 
 variable "region" {
   description = "AWS region to deploy into."
   type        = string
-  default     = "us-east-1"
+  default     = "eastus"
+
+  validation {
+    condition     = length(var.region) > 0
+    error_message = "region must not be empty."
+  }
+}
+
+variable "tags" {
+  description = "Additional tags to apply to all resources."
+  type        = map(string)
+  default = {
+    Name = "ssds"
+  }
 }
 
 variable "vpc_cidr" {
@@ -54,15 +99,26 @@ variable "vpc_cidr" {
 }
 
 provider "aws" {
-  {{block_to_replace_cred}}
   region = var.region
+  {{block_to_replace_cred}}
 }
 
 locals {
-  tags = {
-    ManagedBy = "terraform"
-    Project   = var.project_tag
-  }
+  common_tags = merge(
+    {
+      Environment = var.environment
+      ManagedBy   = "terraform"
+      Project     = var.project
+    },
+    var.tags
+  )
+
+  private_subnet_cidrs = [for i in range(var.private_subnet_count) : cidrsubnet(var.vpc_cidr, 8, i + 10)]
+  public_subnet_cidrs  = [for i in range(var.public_subnet_count) : cidrsubnet(var.vpc_cidr, 8, i)]
+}
+
+data "aws_availability_zones" "available" {
+  state = "available"
 }
 
 resource "aws_vpc" "main" {
@@ -71,67 +127,68 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
   instance_tenancy     = "default"
 
-  tags = merge(local.tags, {
-    Name = "pra-vpc"
-  })
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-vpc"
+    }
+  )
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
-  tags = merge(local.tags, {
-    Name = "pra-igw"
-  })
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-igw"
+    }
+  )
 }
 
 resource "aws_subnet" "public" {
-  availability_zone       = var.availability_zones[0]
-  cidr_block              = var.public_subnet_cidr
+  for_each = { for idx, cidr in local.public_subnet_cidrs : tostring(idx) => cidr }
+
+  availability_zone       = data.aws_availability_zones.available.names[tonumber(each.key)]
+  cidr_block              = each.value
   map_public_ip_on_launch = true
   vpc_id                  = aws_vpc.main.id
 
-  tags = merge(local.tags, {
-    Name = "pra-subnet-public"
-    Tier = "public"
-  })
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-subnet-public-${each.key}"
+      Tier = "public"
+    }
+  )
 }
 
 resource "aws_subnet" "private" {
-  availability_zone = var.availability_zones[0]
-  cidr_block        = var.private_subnet_cidr
-  vpc_id            = aws_vpc.main.id
+  for_each = { for idx, cidr in local.private_subnet_cidrs : tostring(idx) => cidr }
 
-  tags = merge(local.tags, {
-    Name = "pra-subnet-private"
-    Tier = "private"
-  })
-}
+  availability_zone       = data.aws_availability_zones.available.names[tonumber(each.key)]
+  cidr_block              = each.value
+  map_public_ip_on_launch = false
+  vpc_id                  = aws_vpc.main.id
 
-resource "aws_eip" "nat" {
-  domain = "vpc"
-
-  tags = merge(local.tags, {
-    Name = "pra-nat-eip"
-  })
-}
-
-resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public.id
-
-  tags = merge(local.tags, {
-    Name = "pra-nat"
-  })
-
-  depends_on = [aws_internet_gateway.main]
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-subnet-private-${each.key}"
+      Tier = "private"
+    }
+  )
 }
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
-  tags = merge(local.tags, {
-    Name = "pra-rt-public"
-  })
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-rt-public"
+    }
+  )
 }
 
 resource "aws_route" "public_default" {
@@ -141,16 +198,47 @@ resource "aws_route" "public_default" {
 }
 
 resource "aws_route_table_association" "public" {
+  for_each = aws_subnet.public
+
   route_table_id = aws_route_table.public.id
-  subnet_id      = aws_subnet.public.id
+  subnet_id      = each.value.id
+}
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-eip-nat"
+    }
+  )
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  private_ip    = var.nat_gateway_private_ip
+  subnet_id     = one(values(aws_subnet.public)).id
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-nat"
+    }
+  )
+
+  depends_on = [aws_internet_gateway.main]
 }
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
-  tags = merge(local.tags, {
-    Name = "pra-rt-private"
-  })
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-rt-private"
+    }
+  )
 }
 
 resource "aws_route" "private_default" {
@@ -160,108 +248,54 @@ resource "aws_route" "private_default" {
 }
 
 resource "aws_route_table_association" "private" {
+  for_each = aws_subnet.private
+
   route_table_id = aws_route_table.private.id
-  subnet_id      = aws_subnet.private.id
+  subnet_id      = each.value.id
 }
 
 resource "aws_security_group" "vpce" {
-  description = "Security group for Interface VPC Endpoints"
-  name        = "pra-vpce"
+  description = "Security group for VPC interface endpoints"
+  name        = "${var.project}-${var.environment}-vpce"
   vpc_id      = aws_vpc.main.id
 
-  tags = merge(local.tags, {
-    Name = "pra-sg-vpce"
-  })
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-sg-vpce"
+    }
+  )
 }
 
-resource "aws_vpc_security_group_ingress_rule" "vpce_https_from_vpc" {
-  cidr_ipv4         = aws_vpc.main.cidr_block
-  from_port         = 443
-  ip_protocol       = "tcp"
-  security_group_id = aws_security_group.vpce.id
-  to_port           = 443
-}
-
-resource "aws_vpc_security_group_egress_rule" "vpce_all" {
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "-1"
-  security_group_id = aws_security_group.vpce.id
-}
-
-resource "aws_vpc_endpoint" "s3" {
-  route_table_ids   = [aws_route_table.private.id]
-  service_name      = "com.amazonaws.${var.region}.s3"
-  vpc_endpoint_type = "Gateway"
-  vpc_id            = aws_vpc.main.id
-
-  tags = merge(local.tags, {
-    Name = "pra-vpce-s3"
-  })
-}
-
-resource "aws_vpc_endpoint" "dynamodb" {
-  route_table_ids   = [aws_route_table.private.id]
-  service_name      = "com.amazonaws.${var.region}.dynamodb"
-  vpc_endpoint_type = "Gateway"
-  vpc_id            = aws_vpc.main.id
-
-  tags = merge(local.tags, {
-    Name = "pra-vpce-dynamodb"
-  })
-}
-
-resource "aws_vpc_endpoint" "ssm" {
+resource "aws_vpc_endpoint" "dsa" {
   private_dns_enabled = true
   security_group_ids  = [aws_security_group.vpce.id]
-  service_name        = "com.amazonaws.${var.region}.ssm"
-  subnet_ids          = [aws_subnet.private.id]
+  service_name        = "dsa"
+  subnet_ids          = [for s in values(aws_subnet.private) : s.id]
   vpc_endpoint_type   = "Interface"
   vpc_id              = aws_vpc.main.id
 
-  tags = merge(local.tags, {
-    Name = "pra-vpce-ssm"
-  })
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project}-${var.environment}-vpce-dsa"
+    }
+  )
 }
 
-resource "aws_vpc_endpoint" "ssmmessages" {
-  private_dns_enabled = true
-  security_group_ids  = [aws_security_group.vpce.id]
-  service_name        = "com.amazonaws.${var.region}.ssmmessages"
-  subnet_ids          = [aws_subnet.private.id]
-  vpc_endpoint_type   = "Interface"
-  vpc_id              = aws_vpc.main.id
-
-  tags = merge(local.tags, {
-    Name = "pra-vpce-ssmmessages"
-  })
+output "nat_gateway_id" {
+  description = "ID of the NAT Gateway."
+  value       = aws_nat_gateway.main.id
 }
 
-resource "aws_vpc_endpoint" "ec2messages" {
-  private_dns_enabled = true
-  security_group_ids  = [aws_security_group.vpce.id]
-  service_name        = "com.amazonaws.${var.region}.ec2messages"
-  subnet_ids          = [aws_subnet.private.id]
-  vpc_endpoint_type   = "Interface"
-  vpc_id              = aws_vpc.main.id
-
-  tags = merge(local.tags, {
-    Name = "pra-vpce-ec2messages"
-  })
+output "private_subnet_ids" {
+  description = "IDs of the private subnets."
+  value       = [for s in values(aws_subnet.private) : s.id]
 }
 
-output "nat_gateway_public_ip" {
-  description = "Public IP address of the NAT Gateway (allocated via EIP)."
-  value       = aws_eip.nat.public_ip
-}
-
-output "private_subnet_id" {
-  description = "ID of the private subnet."
-  value       = aws_subnet.private.id
-}
-
-output "public_subnet_id" {
-  description = "ID of the public subnet."
-  value       = aws_subnet.public.id
+output "public_subnet_ids" {
+  description = "IDs of the public subnets."
+  value       = [for s in values(aws_subnet.public) : s.id]
 }
 
 output "vpc_id" {
@@ -269,13 +303,7 @@ output "vpc_id" {
   value       = aws_vpc.main.id
 }
 
-output "vpc_endpoint_ids" {
-  description = "VPC Endpoint IDs created (S3, DynamoDB, SSM, SSMMessages, EC2Messages)."
-  value = {
-    dynamodb    = aws_vpc_endpoint.dynamodb.id
-    ec2messages = aws_vpc_endpoint.ec2messages.id
-    s3          = aws_vpc_endpoint.s3.id
-    ssm         = aws_vpc_endpoint.ssm.id
-    ssmmessages = aws_vpc_endpoint.ssmmessages.id
-  }
+output "vpc_endpoint_id_dsa" {
+  description = "ID of the VPC Endpoint named 'dsa'."
+  value       = aws_vpc_endpoint.dsa.id
 }
