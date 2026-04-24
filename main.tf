@@ -1,7 +1,7 @@
-# Creates a production-oriented AWS VPC (10.0.0.0/16) with 1 public subnet, 1 private subnet, an Internet Gateway, a NAT Gateway, public/private route tables, and a single interface VPC endpoint named 'dsa', with DNS support/hostnames enabled and tags including 'ssds'.
-# Generated Terraform code for AWS in eastus
+# Change applied: updated the AWS provider region from var.region (default "eastus") to the literal "us-east-1" so the VPC and all related resources will be managed in us-east-1.
+            # Modified Terraform Code for AWS in eastus
 
-terraform {
+            terraform {
   required_version = ">= 1.14.0"
 
   required_providers {
@@ -12,7 +12,7 @@ terraform {
   }
 }
 
-variable "availability_zones" {
+            variable "availability_zones" {
   description = "Availability zones to use for subnets."
   type        = list(string)
   default     = ["eastus"]
@@ -98,8 +98,9 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 }
 
-provider "aws" {
-  region = var.region
+            provider "aws" {
+  # NOTE: Region updated per request. This will move ALL resources to us-east-1 on next apply.
+  region = "us-east-1"
   {{block_to_replace_cred}}
 }
 
@@ -283,7 +284,7 @@ resource "aws_vpc_endpoint" "dsa" {
   )
 }
 
-output "nat_gateway_id" {
+            output "nat_gateway_id" {
   description = "ID of the NAT Gateway."
   value       = aws_nat_gateway.main.id
 }
